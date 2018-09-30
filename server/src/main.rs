@@ -1,0 +1,183 @@
+mod client;
+mod id;
+mod state;
+
+use serde_derive::{Serialize,Deserialize};
+use futures::{Future, Sink, Stream, sync::mpsc};
+use warp::{path, Filter, ws::{Message,WebSocket}};
+use std::sync::{Arc, RwLock};
+
+type State = Arc<RwLock<state::State>>;
+
+fn main() {
+
+    // Make some shared state available in every route that needs it:
+    let state: State = Arc::new(RwLock::new(state::State::new()));
+    let with_state = move || {
+        let s = state.clone();
+        warp::any().map(move || s.clone())
+    };
+
+    // WS /api/sender/ws
+    let api_sender_ws = path!("api" / "sender" / "ws")
+        .and(warp::ws2())
+        .and(with_state())
+        .map(|ws: warp::ws::Ws2, state: State| {
+            ws.on_upgrade(|websocket| {
+                handle_sender_connection(websocket, state)
+            })
+        });
+
+    // WS /api/receiver/ws
+    let api_receiver_ws = path!("api" / "receiver" / "ws")
+        .and(warp::ws2())
+        .and(with_state())
+        .map(|ws: warp::ws::Ws2, state: State| {
+            ws.on_upgrade(|websocket| {
+                handle_receiver_connection(websocket, state)
+            })
+        });
+
+    // GET client files
+    let other = warp::get2()
+        .and(warp::path::tail())
+        .map(client::return_file);
+
+    // put our routes together and serve them:
+    let routes = api_sender_ws
+        .or(api_receiver_ws)
+        .or(other);
+
+    println!("Starting server!");
+    warp::serve(routes)
+        .run(([127, 0, 0, 1], 3030));
+
+}
+
+fn handle_sender_connection(ws: WebSocket, state: State) -> impl Future<Item = (), Error = ()> {
+
+    // Get hold of a transmitter and receiver of messages. Forward from
+    // a channel so that we can clone the messages_to_sender side and pass it around:
+    let (tx, messages_from_sender) = ws.split();
+    let (messages_to_sender, rx) = mpsc::channel(0);
+
+    let shared_sender_id = Arc::new(RwLock::new(None as Option<id::Id>));
+
+    let f1 = tx.sink_map_err(|_| ()).send_all(rx);
+    let f2 = messages_from_sender
+        // Each time a message comes in, handle it:
+        .for_each(move |msg| {
+
+            match msg.to_str() {
+                Ok(s) => {
+                    match serde_json::from_str(s) {
+                        Ok(msg) => handle_sender_message(shared_sender_id.clone(), state.clone(), msg),
+                        Err(e) => send_message(messages_to_sender.clone(), &MsgToSender::Error{ reason: format!("Could not decode message: {}",e) })
+                    }
+                },
+                Err(_) => {
+
+                    // message is binary so must be data. need to decode and pass along to necessary place.
+
+                }
+            };
+
+            Ok(())
+        })
+        // When the connection is closed, for_each ends
+        // and this will run:
+        .then(move |res| {
+            // state.write().unwrap().remove_sender(&this_id);
+            res
+        })
+        // Catch and report any errors:
+        .map_err(|e| {
+            eprintln!("Websocket error from sender: {}", e);
+        });
+
+    // Run our stream and our channel forwarding futures until completion:
+    f1.join(f2).map(|_| ())
+}
+
+fn handle_sender_message(_id: Arc<RwLock<Option<id::Id>>>, state: State, msg: MsgFromSender) {
+    use crate::MsgFromSender::*;
+    match msg {
+        Handshake { id: _maybeId } => {
+            state.write().unwrap();
+        },
+        FilesChanged => {
+
+        },
+        FileList { files: _ } => {
+
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[serde(tag = "type")]
+enum MsgToSender {
+    /// Acknowledge a handshake message, giving back the ID:
+    HandshakeAck { id: id::Id },
+    /// Send back error if something went wrong:
+    Error { reason: String }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[serde(tag = "type")]
+enum MsgFromSender {
+    /// Expected when first connected. If client already has ID they provide it:
+    Handshake { id: Option<id::Id> },
+    /// Notification when files have changed:
+    FilesChanged,
+    /// A list of files that the sender has:
+    FileList { files: Vec<File> }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+struct File {
+    id: String,
+    name: String,
+    size: u64
+}
+
+fn handle_receiver_connection(ws: WebSocket, _state: State) -> impl Future<Item = (), Error = ()> {
+
+    let (_tx, messages_from_receiver) = ws.split();
+    // let this_id = state.write().unwrap().add_receiver(tx);
+
+    messages_from_receiver
+        // Each time a message comes in, handle it:
+        .for_each(|_msg| {
+
+            Ok(())
+        })
+        // When the connection is closed, for_each ends
+        // and this will run:
+        .then(move |res| {
+            // state.write().unwrap().remove_receiver(&this_id);
+            res
+        })
+        // Catch and report any errors:
+        .map_err(|e| {
+            eprintln!("Websocket error from receiver: {}", e);
+        })
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[serde(tag = "type")]
+enum MsgToReceiver {
+    HandshakeAck { id: id::Id }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[serde(tag = "type")]
+enum MsgFromReceiver {
+    /// Expected when first connected. If client already has ID they provide it:
+    Hankshake { sender_id: id::Id, id: Option<id::Id> },
+}
+
+fn send_message<Msg: serde::Serialize>(mut tx: impl Sink<SinkItem = Message>, msg: &Msg) {
+    let json = serde_json::to_string(msg).expect("should encode");
+    let _ = tx.start_send(Message::text(json));
+}
