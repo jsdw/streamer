@@ -3,16 +3,18 @@
 mod client;
 mod id;
 mod state;
+mod messages;
 
 use serde_derive::{Serialize,Deserialize};
 use futures::{Future, Sink, Stream, sync::mpsc};
 use warp::{path, Filter, ws::{Message,WebSocket}};
-use std::sync::{Arc, RwLock};
-use derive_more::{FromStr};
 use warp::http::{Response,status::StatusCode};
+use std::sync::{Arc, RwLock};
+use derive_more::{FromStr,Display};
 use hyper::Body;
 
-use self::id::Id;
+use crate::messages::{MsgToReceiver, MsgFromReceiver, MsgToSender, MsgFromSender};
+use crate::id::Id;
 
 #[derive(FromStr)]
 struct FileId(Id);
@@ -59,13 +61,13 @@ fn main() {
         .and(warp::post2())
         .and(warp::filters::body::stream())
         .and(with_state())
-        .map(handle_upload);
+        .and_then(handle_upload);
 
     // Download files from sender
     let api_download = path!("api" / "download" / SenderId / FileId / "called" / String)
         .and(warp::get2())
         .and(with_state())
-        .map(handle_download);
+        .and_then(handle_download);
 
     // GET client files
     let other = warp::get2()
@@ -85,51 +87,66 @@ fn main() {
 
 }
 
-fn handle_upload<S, B>(stream_id: StreamId, stream: S, state: State) -> impl warp::Reply
+fn handle_upload<S, B>(stream_id: StreamId, stream: S, state: State) -> Result<impl warp::Reply, warp::Rejection>
     where
         S: Stream<Item = B, Error = warp::Error> + Send + 'static,
         B: bytes::Buf
 {
 
-    // find the stream we want to pipe to. If it exists, pipe to it.
+    // find the stream we want to pipe to. If it does not exist, bail out with a 404.
     let stream_id = stream_id.0;
-    let maybe_sender = state.take_stream_sender(stream_id);
+    let sender = match state.take_stream_sender(stream_id) {
+        Some(s) => s,
+        None => return Err(warp::reject::not_found())
+    };
 
-    // use futures::mpsc::channel instead. it has a .send or .send_all method which returns
-    // a Future that we can wait on. Body::channel() doesn't seem to (tho maybe we
-    // could wrap it into its own future?!?)
+    // Turn our stream of bytes into the format we want to send:
+    let bytes = stream
+        .map(|chunk| chunk.bytes().to_owned())
+        .map_err(|e| Err::new(format!["Stream error: {}", e]));
 
-    let s = stream.for_each(|chunk| {
+    // Stream the bytes to the receiving end, only finishing when it's complete:
+    let s = sender
+        .sink_map_err(|e| Err::new(format!["Send error: {}", e]))
+        .send_all(bytes)
+        .and_then(|_| Ok("Transfer successful"))
+        .into_stream();
 
-        // let sender = maybe_sender.unwrap(); // remove unwrap eventually.
+    // Return the stream, which hopefully will resolve into a body message:
+    let res = Response::builder()
+        .status(200)
+        .body(Body::wrap_stream(s))
+        .unwrap();
 
-        // stream chunk to receiver here.
-        futures::future::ok(())
-    }).then(|_| {
-        // finished streaming body to receiver, return some response body now:
-        let body: Result<String, warp::Error> = Ok("hi".to_owned());
-        body
-    });
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .body(Body::wrap_stream(s.into_stream()))
+    Ok(res)
 
 }
 
-fn handle_download(sender_id: SenderId, file_id: FileId, filename: String, state: State) -> impl warp::Reply {
+fn handle_download(sender_id: SenderId, file_id: FileId, filename: String, state: State) -> Result<impl warp::Reply, warp::Rejection> {
 
-    // create a unique ID for this stream. set up channel in that stream.
-    let (sender, body) = Body::channel();
-    let stream_id = state.add_stream_sender(sender);
+    let sender_id = sender_id.0;
+    let file_id = file_id.0;
+    let (stream_sender, receiver) = mpsc::channel(0);
+    let stream_id = state.add_stream_sender(stream_sender);
+    let body_stream = receiver.map_err(|e| Err::boxed("Error reading from stream"));
 
     // ask for upload from sender for file. sender then calls handle_upload which streams data across to here.
+    let sender = state.get_sender(sender_id).ok_or(warp::reject::not_found())?;
+
+    let msg = MsgToSender::PleaseUpload {
+        file_id: file_id,
+        stream_id: stream_id
+    };
+
+    sender.tx.send(msg);
 
     // stream the response back to the receiver:
-    Response::builder()
+    let res = Response::builder()
         .status(StatusCode::OK)
         .header("content-type", mime_guess::guess_mime_type(filename).as_ref())
-        .body(body)
+        .body(Body::wrap_stream(body_stream));
+
+    Ok(res)
 }
 
 fn handle_sender_connection(ws: WebSocket, state: State) -> impl Future<Item = (), Error = ()> {
@@ -178,45 +195,21 @@ fn handle_sender_connection(ws: WebSocket, state: State) -> impl Future<Item = (
 }
 
 fn handle_sender_message(_id: Arc<RwLock<Option<id::Id>>>, state: State, msg: MsgFromSender) {
-    use self::MsgFromSender::*;
+    use self::messages::MsgFromSender::*;
     match msg {
         Handshake { id: _maybeId } => {
-            // state.write().unwrap();
+
         },
-        FilesChanged => {
+        FilesAdded { files: _ } => {
+
+        },
+        FilesRemoved { files: _ } => {
 
         },
         FileList { files: _ } => {
 
         }
     }
-}
-
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
-#[serde(tag = "type")]
-enum MsgToSender {
-    /// Acknowledge a handshake message, giving back the ID:
-    HandshakeAck { id: id::Id },
-    /// Send back error if something went wrong:
-    Error { reason: String }
-}
-
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
-#[serde(tag = "type")]
-enum MsgFromSender {
-    /// Expected when first connected. If client already has ID they provide it:
-    Handshake { id: Option<id::Id> },
-    /// Notification when files have changed:
-    FilesChanged,
-    /// A list of files that the sender has:
-    FileList { files: Vec<File> }
-}
-
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
-struct File {
-    id: String,
-    name: String,
-    size: u64
 }
 
 fn handle_receiver_connection(ws: WebSocket, _state: State) -> impl Future<Item = (), Error = ()> {
@@ -242,20 +235,27 @@ fn handle_receiver_connection(ws: WebSocket, _state: State) -> impl Future<Item 
         })
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
-#[serde(tag = "type")]
-enum MsgToReceiver {
-    HandshakeAck { id: id::Id }
-}
-
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
-#[serde(tag = "type")]
-enum MsgFromReceiver {
-    /// Expected when first connected. If client already has ID they provide it:
-    Hankshake { sender_id: id::Id, id: Option<id::Id> },
-}
-
 fn send_message<Msg: serde::Serialize>(mut tx: impl Sink<SinkItem = Message>, msg: &Msg) {
     let json = serde_json::to_string(msg).expect("should encode");
     let _ = tx.start_send(Message::text(json));
+}
+
+#[derive(Display, Debug)]
+struct Err {
+    msg: String
+}
+
+impl Err {
+    pub fn new(s: impl Into<String>) -> Err {
+        Err { msg: s.into() }
+    }
+    pub fn boxed(s: impl Into<String>) -> Box<Err> {
+        Box::new(Err::new(s))
+    }
+}
+
+impl std::error::Error for Err {
+    fn description(&self) -> &str {
+        &self.msg
+    }
 }
