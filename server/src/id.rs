@@ -10,6 +10,9 @@ impl IdGen {
     pub fn new() -> IdGen {
         IdGen{}
     }
+
+    // This doesn't need mut self at the moment, but eventually
+    // we'll prob make it more efficient by keeping state:
     pub fn make_id(&mut self) -> Id {
         Id { val: rand::random() }
     }

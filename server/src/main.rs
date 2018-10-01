@@ -1,3 +1,5 @@
+#![recursion_limit="1024"]
+
 mod client;
 mod id;
 mod state;
@@ -6,13 +8,27 @@ use serde_derive::{Serialize,Deserialize};
 use futures::{Future, Sink, Stream, sync::mpsc};
 use warp::{path, Filter, ws::{Message,WebSocket}};
 use std::sync::{Arc, RwLock};
+use derive_more::{FromStr};
+use warp::http::{Response,status::StatusCode};
+use hyper::Body;
 
-type State = Arc<RwLock<state::State>>;
+use self::id::Id;
+
+#[derive(FromStr)]
+struct FileId(Id);
+
+#[derive(FromStr)]
+struct SenderId(Id);
+
+#[derive(FromStr)]
+struct StreamId(Id);
+
+type State = Arc<state::State>;
 
 fn main() {
 
     // Make some shared state available in every route that needs it:
-    let state: State = Arc::new(RwLock::new(state::State::new()));
+    let state: State = Arc::new(state::State::new());
     let with_state = move || {
         let s = state.clone();
         warp::any().map(move || s.clone())
@@ -38,6 +54,19 @@ fn main() {
             })
         });
 
+    // upload files to sender
+    let api_upload = path!("api" / "upload" / StreamId)
+        .and(warp::post2())
+        .and(warp::filters::body::stream())
+        .and(with_state())
+        .map(handle_upload);
+
+    // Download files from sender
+    let api_download = path!("api" / "download" / SenderId / FileId / "called" / String)
+        .and(warp::get2())
+        .and(with_state())
+        .map(handle_download);
+
     // GET client files
     let other = warp::get2()
         .and(warp::path::tail())
@@ -46,12 +75,61 @@ fn main() {
     // put our routes together and serve them:
     let routes = api_sender_ws
         .or(api_receiver_ws)
+        .or(api_upload)
+        .or(api_download)
         .or(other);
 
     println!("Starting server!");
     warp::serve(routes)
         .run(([127, 0, 0, 1], 3030));
 
+}
+
+fn handle_upload<S, B>(stream_id: StreamId, stream: S, state: State) -> impl warp::Reply
+    where
+        S: Stream<Item = B, Error = warp::Error> + Send + 'static,
+        B: bytes::Buf
+{
+
+    // find the stream we want to pipe to. If it exists, pipe to it.
+    let stream_id = stream_id.0;
+    let maybe_sender = state.take_stream_sender(stream_id);
+
+    // use futures::mpsc::channel instead. it has a .send or .send_all method which returns
+    // a Future that we can wait on. Body::channel() doesn't seem to (tho maybe we
+    // could wrap it into its own future?!?)
+
+    let s = stream.for_each(|chunk| {
+
+        // let sender = maybe_sender.unwrap(); // remove unwrap eventually.
+
+        // stream chunk to receiver here.
+        futures::future::ok(())
+    }).then(|_| {
+        // finished streaming body to receiver, return some response body now:
+        let body: Result<String, warp::Error> = Ok("hi".to_owned());
+        body
+    });
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::wrap_stream(s.into_stream()))
+
+}
+
+fn handle_download(sender_id: SenderId, file_id: FileId, filename: String, state: State) -> impl warp::Reply {
+
+    // create a unique ID for this stream. set up channel in that stream.
+    let (sender, body) = Body::channel();
+    let stream_id = state.add_stream_sender(sender);
+
+    // ask for upload from sender for file. sender then calls handle_upload which streams data across to here.
+
+    // stream the response back to the receiver:
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", mime_guess::guess_mime_type(filename).as_ref())
+        .body(body)
 }
 
 fn handle_sender_connection(ws: WebSocket, state: State) -> impl Future<Item = (), Error = ()> {
@@ -100,10 +178,10 @@ fn handle_sender_connection(ws: WebSocket, state: State) -> impl Future<Item = (
 }
 
 fn handle_sender_message(_id: Arc<RwLock<Option<id::Id>>>, state: State, msg: MsgFromSender) {
-    use crate::MsgFromSender::*;
+    use self::MsgFromSender::*;
     match msg {
         Handshake { id: _maybeId } => {
-            state.write().unwrap();
+            // state.write().unwrap();
         },
         FilesChanged => {
 
