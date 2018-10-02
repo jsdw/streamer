@@ -42,7 +42,7 @@ fn main() {
         .and(with_state())
         .map(|ws: warp::ws::Ws2, state: State| {
             ws.on_upgrade(|websocket| {
-                handle_sender_connection(websocket, state)
+                handle_sender_ws(websocket, state)
             })
         });
 
@@ -52,7 +52,7 @@ fn main() {
         .and(with_state())
         .map(|ws: warp::ws::Ws2, state: State| {
             ws.on_upgrade(|websocket| {
-                handle_receiver_connection(websocket, state)
+                handle_receiver_ws(websocket, state)
             })
         });
 
@@ -128,17 +128,26 @@ fn handle_download(sender_id: SenderId, file_id: FileId, filename: String, state
     let file_id = file_id.0;
     let (stream_sender, receiver) = mpsc::channel(0);
     let stream_id = state.add_stream_sender(stream_sender);
-    let body_stream = receiver.map_err(|e| Err::boxed("Error reading from stream"));
-
-    // ask for upload from sender for file. sender then calls handle_upload which streams data across to here.
-    let sender = state.get_sender(sender_id).ok_or(warp::reject::not_found())?;
+    let body_stream = receiver.map_err(|()| Err::boxed_never());
 
     let msg = MsgToSender::PleaseUpload {
         file_id: file_id,
         stream_id: stream_id
     };
 
-    sender.tx.send(msg);
+    // ask sender to upload file. sender then calls
+    // handle_upload which streams data across to here.
+    let send_message = state
+        .get_sender(sender_id)
+        .ok_or(warp::reject::not_found())?
+        .tx.send(msg)
+        .map_err(|e| Err::boxed(format!["Error sending: {}", e]));
+
+    // do the asking, then stream the body over:
+    let body_stream = send_message
+        .map(|_| Vec::new())
+        .into_stream()
+        .chain(body_stream);
 
     // stream the response back to the receiver:
     let res = Response::builder()
@@ -149,7 +158,7 @@ fn handle_download(sender_id: SenderId, file_id: FileId, filename: String, state
     Ok(res)
 }
 
-fn handle_sender_connection(ws: WebSocket, state: State) -> impl Future<Item = (), Error = ()> {
+fn handle_sender_ws(ws: WebSocket, state: State) -> impl Future<Item = (), Error = ()> {
 
     // Get hold of a transmitter and receiver of messages. Forward from
     // a channel so that we can clone the messages_to_sender side and pass it around:
@@ -163,21 +172,18 @@ fn handle_sender_connection(ws: WebSocket, state: State) -> impl Future<Item = (
         // Each time a message comes in, handle it:
         .for_each(move |msg| {
 
-            match msg.to_str() {
-                Ok(s) => {
-                    match serde_json::from_str(s) {
-                        Ok(msg) => handle_sender_message(shared_sender_id.clone(), state.clone(), msg),
-                        Err(e) => send_message(messages_to_sender.clone(), &MsgToSender::Error{ reason: format!("Could not decode message: {}",e) })
-                    }
-                },
-                Err(_) => {
-
-                    // message is binary so must be data. need to decode and pass along to necessary place.
-
-                }
+            let msg = match msg.to_str() {
+                Ok(s) => s,
+                Err(_) => return Ok(())
             };
 
+            match serde_json::from_str(msg) {
+                Ok(msg) => handle_sender_message(shared_sender_id.clone(), state.clone(), msg),
+                Err(e) => println!("Could not decode message: {}",e)
+            }
+
             Ok(())
+
         })
         // When the connection is closed, for_each ends
         // and this will run:
@@ -212,7 +218,7 @@ fn handle_sender_message(_id: Arc<RwLock<Option<id::Id>>>, state: State, msg: Ms
     }
 }
 
-fn handle_receiver_connection(ws: WebSocket, _state: State) -> impl Future<Item = (), Error = ()> {
+fn handle_receiver_ws(ws: WebSocket, _state: State) -> impl Future<Item = (), Error = ()> {
 
     let (_tx, messages_from_receiver) = ws.split();
     // let this_id = state.write().unwrap().add_receiver(tx);
@@ -251,6 +257,9 @@ impl Err {
     }
     pub fn boxed(s: impl Into<String>) -> Box<Err> {
         Box::new(Err::new(s))
+    }
+    pub fn boxed_never() -> Box<Err> {
+        Box::new(Err { msg: String::new() })
     }
 }
 
