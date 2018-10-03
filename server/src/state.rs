@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Mutex,RwLock};
-use futures::sync::mpsc;
+use futures::sync::{oneshot,mpsc};
 use crate::id::{IdGen,Id};
-use crate::messages::{MsgToSender,MsgToReceiver};
+use crate::messages::{MsgToSender,MsgToReceiver,FileInfoForStream};
 
 pub type Tx<Msg> = mpsc::Sender<Msg>;
 
@@ -17,12 +17,17 @@ pub struct Receiver {
     pub sender_id: Id
 }
 
+pub struct Stream {
+    pub data: Tx<Vec<u8>>,
+    pub info: oneshot::Sender<FileInfoForStream>
+}
+
 pub struct State {
     senders: RwLock<HashMap<Id, Sender>>,
     receivers: RwLock<HashMap<Id, Receiver>>,
     // Each time a download starts, a new stream is created. This asks the sender to
     // provide the requested bytes and streams them to the receiver.
-    streams: Mutex<HashMap<Id, Tx<Vec<u8>>>>,
+    streams: Mutex<HashMap<Id, Stream>>,
     id_gen: Mutex<IdGen>
 }
 
@@ -66,12 +71,12 @@ impl State {
             .map(|_| true)
             .unwrap_or(false)
     }
-    pub fn add_stream_sender(&self, sender: Tx<Vec<u8>>) -> Id {
+    pub fn add_stream(&self, stream: Stream) -> Id {
         let stream_id = self.get_id();
-        self.streams.lock().unwrap().insert(stream_id, sender);
+        self.streams.lock().unwrap().insert(stream_id, stream);
         stream_id
     }
-    pub fn take_stream_sender(&self, stream_id: Id) -> Option<Tx<Vec<u8>>> {
+    pub fn take_stream(&self, stream_id: Id) -> Option<Stream> {
         self.streams.lock().unwrap().remove(&stream_id)
     }
 }

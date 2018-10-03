@@ -6,7 +6,7 @@ mod state;
 mod messages;
 
 use serde_derive::{Serialize,Deserialize};
-use futures::{Future, Sink, Stream, sync::mpsc};
+use futures::{future, Future, Sink, Stream, sync::{oneshot,mpsc}};
 use warp::{path, Filter, ws::{Message,WebSocket}};
 use warp::http::{Response,status::StatusCode};
 use std::sync::{Arc, RwLock};
@@ -64,7 +64,7 @@ fn main() {
         .and_then(handle_upload);
 
     // Download files from sender
-    let api_download = path!("api" / "download" / SenderId / FileId / "called" / String)
+    let api_download = path!("api" / "download" / SenderId / FileId)
         .and(warp::get2())
         .and(with_state())
         .and_then(handle_download);
@@ -87,7 +87,7 @@ fn main() {
 
 }
 
-fn handle_upload<S, B>(stream_id: StreamId, stream: S, state: State) -> Result<impl warp::Reply, warp::Rejection>
+fn handle_upload<S, B>(stream_id: StreamId, body: S, state: State) -> Result<impl warp::Reply, warp::Rejection>
     where
         S: Stream<Item = B, Error = warp::Error> + Send + 'static,
         B: bytes::Buf
@@ -95,18 +95,18 @@ fn handle_upload<S, B>(stream_id: StreamId, stream: S, state: State) -> Result<i
 
     // find the stream we want to pipe to. If it does not exist, bail out with a 404.
     let stream_id = stream_id.0;
-    let sender = match state.take_stream_sender(stream_id) {
+    let stream = match state.take_stream(stream_id) {
         Some(s) => s,
         None => return Err(warp::reject::not_found())
     };
 
     // Turn our stream of bytes into the format we want to send:
-    let bytes = stream
+    let bytes = body
         .map(|chunk| chunk.bytes().to_owned())
         .map_err(|e| Err::new(format!["Stream error: {}", e]));
 
     // Stream the bytes to the receiving end, only finishing when it's complete:
-    let s = sender
+    let s = stream.data
         .sink_map_err(|e| Err::new(format!["Send error: {}", e]))
         .send_all(bytes)
         .and_then(|_| Ok("Transfer successful"))
@@ -122,40 +122,52 @@ fn handle_upload<S, B>(stream_id: StreamId, stream: S, state: State) -> Result<i
 
 }
 
-fn handle_download(sender_id: SenderId, file_id: FileId, filename: String, state: State) -> Result<impl warp::Reply, warp::Rejection> {
+fn handle_download(sender_id: SenderId, file_id: FileId, state: State) -> impl Future<Item = impl warp::Reply, Error = warp::Rejection> {
 
     let sender_id = sender_id.0;
     let file_id = file_id.0;
-    let (stream_sender, receiver) = mpsc::channel(0);
-    let stream_id = state.add_stream_sender(stream_sender);
-    let body_stream = receiver.map_err(|()| Err::boxed_never());
+
+    let (stream_data, data_receiver) = mpsc::channel(0);
+    let (stream_info, info_receiver) = oneshot::channel();
+
+    let stream_id = state.add_stream(state::Stream {
+        data: stream_data,
+        info: stream_info
+    });
+
+    let sender = match state.get_sender(sender_id) {
+        Some(s) => s,
+        None => return future::Either::A(future::err(warp::reject::not_found()))
+    };
 
     let msg = MsgToSender::PleaseUpload {
         file_id: file_id,
         stream_id: stream_id
     };
 
-    // ask sender to upload file. sender then calls
-    // handle_upload which streams data across to here.
-    let send_message = state
-        .get_sender(sender_id)
-        .ok_or(warp::reject::not_found())?
-        .tx.send(msg)
-        .map_err(|e| Err::boxed(format!["Error sending: {}", e]));
+    let res = sender.tx
+        .send(msg)
+        .map_err(|e| warp::reject::server_error().with(e))
+        .and_then(|_| info_receiver.map_err(|e| warp::reject::server_error().with(e)))
+        .and_then(|stream_info| {
 
-    // do the asking, then stream the body over:
-    let body_stream = send_message
-        .map(|_| Vec::new())
-        .into_stream()
-        .chain(body_stream);
+            let body_stream = data_receiver.map_err(|()| Err::boxed_never());
+            let name = stream_info.name;
+            let size = stream_info.size;
 
-    // stream the response back to the receiver:
-    let res = Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", mime_guess::guess_mime_type(filename).as_ref())
-        .body(Body::wrap_stream(body_stream));
+            // stream the response back to the receiver:
+            let res = Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", mime_guess::guess_mime_type(&name).as_ref())
+                .header("content-length", size)
+                .body(Body::wrap_stream(body_stream));
 
-    Ok(res)
+            Ok(res)
+
+        });
+
+    future::Either::B(res)
+
 }
 
 fn handle_sender_ws(ws: WebSocket, state: State) -> impl Future<Item = (), Error = ()> {
@@ -164,8 +176,10 @@ fn handle_sender_ws(ws: WebSocket, state: State) -> impl Future<Item = (), Error
     // a channel so that we can clone the messages_to_sender side and pass it around:
     let (tx, messages_from_sender) = ws.split();
     let (messages_to_sender, rx) = mpsc::channel(0);
-
     let shared_sender_id = Arc::new(RwLock::new(None as Option<id::Id>));
+
+    let shared_sender_id2 = shared_sender_id.clone();
+    let state2 = state.clone();
 
     let f1 = tx.sink_map_err(|_| ()).send_all(rx);
     let f2 = messages_from_sender
@@ -179,16 +193,17 @@ fn handle_sender_ws(ws: WebSocket, state: State) -> impl Future<Item = (), Error
 
             match serde_json::from_str(msg) {
                 Ok(msg) => handle_sender_message(shared_sender_id.clone(), state.clone(), msg),
-                Err(e) => println!("Could not decode message: {}",e)
+                Err(e) => eprintln!("Could not decode message: {}",e)
             }
 
             Ok(())
 
         })
-        // When the connection is closed, for_each ends
-        // and this will run:
+        // When the connection is closed, for_each ends and we clean up:
         .then(move |res| {
-            // state.write().unwrap().remove_sender(&this_id);
+            shared_sender_id2.read().unwrap().map(|sender_id| {
+                state2.remove_sender(sender_id);
+            });
             res
         })
         // Catch and report any errors:
@@ -205,14 +220,28 @@ fn handle_sender_message(_id: Arc<RwLock<Option<id::Id>>>, state: State, msg: Ms
     match msg {
         Handshake { id: _maybeId } => {
 
+            // if ID provided and no sender using it already, use that, else
+            // make a new one. reply to the sender with this ID
+
+        },
+        FileInfoForStream { stream_id: _, info: _ } => {
+
+            // find relevant stream ID and push the info onto the oneshot provided.
+
+        },
+        FileList { files: _ } => {
+
+            // forward on to receivers
+
         },
         FilesAdded { files: _ } => {
+
+            // forward on
 
         },
         FilesRemoved { files: _ } => {
 
-        },
-        FileList { files: _ } => {
+            // forward on
 
         }
     }

@@ -36,7 +36,17 @@ pub enum MsgFromSender {
     /// Notification when files have been removed:
     FilesRemoved { files: Vec<File> },
     /// A list of files that the sender has:
-    FileList { files: Vec<File> }
+    FileList { files: Vec<File> },
+    /// Info for a file for some active stream. needed for download to begin:
+    FileInfoForStream { stream_id: Id, info: FileInfoForStream }
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+pub struct FileInfoForStream {
+    /// Name of the file:
+    pub name: String,
+    /// Size in bytes of the file:
+    pub size: u64
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
