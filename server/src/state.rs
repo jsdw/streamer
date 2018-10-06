@@ -5,10 +5,11 @@ use crate::id::{IdGen,Id};
 use crate::messages::{MsgToSender,MsgToReceiver,FileInfoForStream};
 
 pub type Tx<Msg> = mpsc::Sender<Msg>;
+pub type UnboundedTx<Msg> = mpsc::UnboundedSender<Msg>;
 
 #[derive(Clone)]
 pub struct Sender {
-    pub tx: Tx<MsgToSender>,
+    pub tx: UnboundedTx<MsgToSender>,
 }
 
 #[derive(Clone)]
@@ -17,9 +18,14 @@ pub struct Receiver {
     pub sender_id: Id
 }
 
+pub type StreamInfo = oneshot::Sender<FileInfoForStream>;
+pub type StreamData = Tx<Vec<u8>>;
+
 pub struct Stream {
-    pub data: Tx<Vec<u8>>,
-    pub info: oneshot::Sender<FileInfoForStream>
+    // These props are optional because they will be removed
+    // separately from the stream and set to none.
+    data: Option<StreamData>,
+    info: Option<StreamInfo>
 }
 
 pub struct State {
@@ -43,7 +49,7 @@ impl State {
     pub fn get_id(&self) -> Id {
         self.id_gen.lock().unwrap().make_id()
     }
-    pub fn add_sender(&self, sender_tx: Tx<MsgToSender>, id: Option<Id>) -> Id {
+    pub fn add_sender(&self, sender_tx: UnboundedTx<MsgToSender>, id: Option<Id>) -> Id {
         let this_id = id.unwrap_or_else(|| self.get_id());
         self.senders.write().unwrap().insert(this_id, Sender { tx: sender_tx });
         this_id
@@ -71,12 +77,24 @@ impl State {
             .map(|_| true)
             .unwrap_or(false)
     }
-    pub fn add_stream(&self, stream: Stream) -> Id {
+    pub fn add_stream(&self, stream_data: Tx<Vec<u8>>, stream_info: oneshot::Sender<FileInfoForStream>) -> Id {
         let stream_id = self.get_id();
-        self.streams.lock().unwrap().insert(stream_id, stream);
+        self.streams.lock().unwrap().insert(stream_id, Stream {
+            info: Some(stream_info),
+            data: Some(stream_data)
+        });
         stream_id
     }
-    pub fn take_stream(&self, stream_id: Id) -> Option<Stream> {
-        self.streams.lock().unwrap().remove(&stream_id)
+    pub fn take_stream_info(&self, stream_id: Id) -> Option<StreamInfo> {
+        match self.streams.lock().unwrap().get_mut(&stream_id) {
+            Some(s) => std::mem::replace(&mut s.info, None),
+            None => None
+        }
+    }
+    pub fn take_stream_data(&self, stream_id: Id) -> Option<StreamData> {
+        match self.streams.lock().unwrap().get_mut(&stream_id) {
+            Some(s) => std::mem::replace(&mut s.data, None),
+            None => None
+        }
     }
 }

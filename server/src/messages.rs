@@ -38,7 +38,7 @@ pub enum MsgFromSender {
     /// A list of files that the sender has:
     FileList { files: Vec<File> },
     /// Info for a file for some active stream. needed for download to begin:
-    FileInfoForStream { stream_id: Id, info: FileInfoForStream }
+    PleaseUploadAck { stream_id: Id, info: FileInfoForStream }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
