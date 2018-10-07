@@ -5,7 +5,13 @@ use crate::id::Id;
 #[serde(tag = "type")]
 pub enum MsgToReceiver {
     /// Acknowledge a handshake message, giving back the ID:
-    HandshakeAck { id: Id }
+    HandshakeAck { id: Id },
+    /// Notification when files have been added:
+    FilesAdded { files: Vec<File> },
+    /// Notification when files have been removed:
+    FilesRemoved { files: Vec<File> },
+    /// A list of files that the sender has:
+    FileList { files: Vec<File> },
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
@@ -13,6 +19,10 @@ pub enum MsgToReceiver {
 pub enum MsgFromReceiver {
     /// Expected when first connected. If client already has ID they provide it:
     Hankshake { sender_id: Id, id: Option<Id> },
+    /// Ask sender to upload a given file to a url defined by stream_id:
+    PleaseUpload { file_id: Id, stream_id: Id },
+    /// Ask sender to provide the file list for me
+    PleaseFileList,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
@@ -22,6 +32,8 @@ pub enum MsgToSender {
     HandshakeAck { id: Id },
     /// Ask sender to upload a given file to a url defined by stream_id:
     PleaseUpload { file_id: Id, stream_id: Id },
+    /// Ask sender to provide the file list for me
+    PleaseFileList,
     /// Send back error if something went wrong:
     Error { reason: String }
 }
@@ -32,11 +44,11 @@ pub enum MsgFromSender {
     /// Expected when first connected. If client already has ID they provide it:
     Handshake { id: Option<Id> },
     /// Notification when files have been added:
-    FilesAdded { files: Vec<File> },
+    FilesAdded { receiver_id: Option<Id>, files: Vec<File> },
     /// Notification when files have been removed:
-    FilesRemoved { files: Vec<File> },
+    FilesRemoved { receiver_id: Option<Id>, files: Vec<File> },
     /// A list of files that the sender has:
-    FileList { files: Vec<File> },
+    FileList { receiver_id: Option<Id>, files: Vec<File> },
     /// Info for a file for some active stream. needed for download to begin:
     PleaseUploadAck { stream_id: Id, info: FileInfoForStream }
 }

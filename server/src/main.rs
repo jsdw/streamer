@@ -95,7 +95,7 @@ fn handle_upload<S, B>(stream_id: StreamId, body: S, state: State) -> Result<imp
 
     // find the stream we want to pipe to. If it does not exist, bail out with a 404.
     let stream_id = stream_id.0;
-    let stream_data = match state.take_stream_data(stream_id) {
+    let stream_data = match state.streams.take_data(stream_id) {
         Some(s) => s,
         None => return Err(warp::reject::not_found())
     };
@@ -130,9 +130,9 @@ fn handle_download(sender_id: SenderId, file_id: FileId, state: State) -> impl F
     let (stream_data, data_receiver) = mpsc::channel(0);
     let (stream_info, info_receiver) = oneshot::channel();
 
-    let stream_id = state.add_stream(stream_data, stream_info);
+    let stream_id = state.streams.add(stream_data, stream_info);
 
-    let sender = match state.get_sender(sender_id) {
+    let sender = match state.senders.get(sender_id) {
         Some(s) => s,
         None => return future::Either::A(future::err(warp::reject::not_found()))
     };
@@ -202,27 +202,29 @@ fn handle_sender_ws(ws: WebSocket, state: State) -> impl Future<Item = (), Error
             use self::messages::MsgFromSender::*;
             match msg {
                 Handshake { id: maybe_id } => {
-
-                    let id = state.add_sender(messages_to_sender.clone(), maybe_id);
+                    let id = state.senders.add(messages_to_sender.clone(), maybe_id);
                     *shared_sender_id.write().unwrap() = Some(id);
                     let _ = messages_to_sender.unbounded_send(MsgToSender::HandshakeAck{ id: id });
-
                 },
                 PleaseUploadAck { stream_id, info } => {
-
-                    if let Some(chan) = state.take_stream_info(stream_id) {
+                    if let Some(chan) = state.streams.take_info(stream_id) {
                         let _ = chan.send(info);
                     }
-
                 },
-                // All other messages are forwarded on to receivers:
-                msg => {
-
+                FilesAdded { receiver_id, files } => {
                     if let Some(sender_id) = *shared_sender_id.read().unwrap() {
-                        // find every receiver with matching sender ID and forward to them.
-                        // add state.get_receivers_mut to provide iterator of mut senders.
+                        state.receivers.write().send(MsgToReceiver::FilesAdded { files }, receiver_id);
                     }
-
+                },
+                FilesRemoved { receiver_id, files } => {
+                    if let Some(sender_id) = *shared_sender_id.read().unwrap() {
+                        state.receivers.write().send(MsgToReceiver::FilesRemoved { files }, receiver_id);
+                    }
+                },
+                FileList { receiver_id, files } => {
+                    if let Some(sender_id) = *shared_sender_id.read().unwrap() {
+                        state.receivers.write().send(MsgToReceiver::FileList { files }, receiver_id);
+                    }
                 }
             }
 
@@ -232,7 +234,7 @@ fn handle_sender_ws(ws: WebSocket, state: State) -> impl Future<Item = (), Error
         // When the connection is closed, for_each ends and we clean up:
         .then(move |res| {
             shared_sender_id2.read().unwrap().map(|sender_id| {
-                state2.remove_sender(sender_id);
+                state2.senders.remove(sender_id);
             });
             res
         });
@@ -240,40 +242,6 @@ fn handle_sender_ws(ws: WebSocket, state: State) -> impl Future<Item = (), Error
     // Run our stream and our channel forwarding futures until completion:
     from_sender.join(pipe).map(|_| ())
 }
-
-// fn handle_sender_message(_id: Arc<RwLock<Option<id::Id>>>, state: State, msg: MsgFromSender) {
-//     use self::messages::MsgFromSender::*;
-//     match msg {
-//         Handshake { id: _maybeId } => {
-
-//             // state.add_sender()
-
-//             // if ID provided and no sender using it already, use that, else
-//             // make a new one. reply to the sender with this ID
-
-//         },
-//         FileInfoForStream { stream_id: _, info: _ } => {
-
-//             // find relevant stream ID and push the info onto the oneshot provided.
-
-//         },
-//         FileList { files: _ } => {
-
-//             // forward on to receivers
-
-//         },
-//         FilesAdded { files: _ } => {
-
-//             // forward on
-
-//         },
-//         FilesRemoved { files: _ } => {
-
-//             // forward on
-
-//         }
-//     }
-// }
 
 fn handle_receiver_ws(ws: WebSocket, _state: State) -> impl Future<Item = (), Error = ()> {
 
