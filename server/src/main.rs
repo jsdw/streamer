@@ -199,12 +199,20 @@ fn handle_sender_ws(ws: WebSocket, state: State) -> impl Future<Item = (), Error
                 Err(_) => return Ok(())
             };
 
+            let send_message = |msg: MsgToReceiver, receiver_id: Option<Id>| {
+                if let Some(receiver_id) = receiver_id {
+                    state.receivers.write().send_one(receiver_id, msg);
+                } else if let Some(sender_id) = *shared_sender_id.read().unwrap() {
+                    state.receivers.write().send_if(msg, |r| r.sender_id == sender_id);
+                }
+            };
+
             use self::messages::MsgFromSender::*;
             match msg {
                 Handshake { id: maybe_id } => {
-                    let id = state.senders.add(messages_to_sender.clone(), maybe_id);
-                    *shared_sender_id.write().unwrap() = Some(id);
-                    let _ = messages_to_sender.unbounded_send(MsgToSender::HandshakeAck{ id: id });
+                    let sender_id = state.senders.add(messages_to_sender.clone(), maybe_id);
+                    *shared_sender_id.write().unwrap() = Some(sender_id);
+                    let _ = messages_to_sender.unbounded_send(MsgToSender::HandshakeAck{ id: sender_id });
                 },
                 PleaseUploadAck { stream_id, info } => {
                     if let Some(chan) = state.streams.take_info(stream_id) {
@@ -212,18 +220,78 @@ fn handle_sender_ws(ws: WebSocket, state: State) -> impl Future<Item = (), Error
                     }
                 },
                 FilesAdded { receiver_id, files } => {
-                    if let Some(sender_id) = *shared_sender_id.read().unwrap() {
-                        state.receivers.write().send(MsgToReceiver::FilesAdded { files }, receiver_id);
-                    }
+                    send_message(MsgToReceiver::FilesAdded { files }, receiver_id);
                 },
                 FilesRemoved { receiver_id, files } => {
-                    if let Some(sender_id) = *shared_sender_id.read().unwrap() {
-                        state.receivers.write().send(MsgToReceiver::FilesRemoved { files }, receiver_id);
-                    }
+                    send_message(MsgToReceiver::FilesRemoved { files }, receiver_id);
                 },
                 FileList { receiver_id, files } => {
-                    if let Some(sender_id) = *shared_sender_id.read().unwrap() {
-                        state.receivers.write().send(MsgToReceiver::FileList { files }, receiver_id);
+                    send_message(MsgToReceiver::FileList { files }, receiver_id);
+                }
+            }
+
+            Ok(())
+
+        })
+        // When the connection is closed, for_each ends and we clean up:
+        .then(move |res| {
+            if let Some(sender_id) = *shared_sender_id2.read().unwrap() {
+                state2.senders.remove(sender_id);
+            }
+            res
+        });
+
+    // Run our stream and our channel forwarding futures until completion:
+    from_sender.join(pipe).map(|_| ())
+}
+
+fn handle_receiver_ws(ws: WebSocket, state: State) -> impl Future<Item = (), Error = ()> {
+
+    // Get hold of a transmitter and receiver of messages:
+    let (tx, messages_from_receiver) = ws.split();
+
+    // Make an unbounded channel that takes MsgToSender:
+    let (messages_to_receiver, rx) = mpsc::unbounded();
+
+    // convert rx to websocket messages and pipe to tx:
+    let pipe = with_serialized_sink(tx).sink_map_err(|_| ()).send_all(rx);
+
+    // keep track of sender ID and receiver ID, once it's known, here:
+    let shared_ids = Arc::new(RwLock::new(None));
+
+    // clones to move into "then" closure:
+    let shared_ids2 = shared_ids.clone();
+    let state2 = state.clone();
+
+    // handle each message we receive from the sender:
+    let from_sender = messages_from_receiver
+        // Catch and report any errors:
+        .map_err(|e| {
+            eprintln!("Websocket error from sender: {}", e);
+        })
+        // Each time a message comes in, handle it:
+        .for_each(move |msg| {
+
+            let msg = match msg.to_str().and_then(|s| serde_json::from_str(s).map_err(|_| ())) {
+                Ok(s) => s,
+                Err(_) => return Ok(())
+            };
+
+            use self::messages::MsgFromReceiver::*;
+            match msg {
+                Handshake { sender_id, id: maybe_id } => {
+                    let receiver_id = state.receivers.add(sender_id, messages_to_receiver.clone(), maybe_id);
+                    *shared_ids.write().unwrap() = Some((sender_id, receiver_id));
+                    let _ = messages_to_receiver.unbounded_send(MsgToReceiver::HandshakeAck{ id: receiver_id });
+                },
+                PleaseUpload { file_id, stream_id } => {
+                    if let Some((sender_id, _receiver_id)) = *shared_ids.read().unwrap() {
+                        state.senders.send(sender_id, MsgToSender::PleaseUpload{ file_id, stream_id });
+                    }
+                },
+                PleaseFileList => {
+                    if let Some((sender_id, receiver_id)) = *shared_ids.read().unwrap() {
+                        state.senders.send(sender_id, MsgToSender::PleaseFileList{ receiver_id });
                     }
                 }
             }
@@ -233,37 +301,14 @@ fn handle_sender_ws(ws: WebSocket, state: State) -> impl Future<Item = (), Error
         })
         // When the connection is closed, for_each ends and we clean up:
         .then(move |res| {
-            shared_sender_id2.read().unwrap().map(|sender_id| {
-                state2.senders.remove(sender_id);
-            });
+            if let Some((_sender_id, receiver_id)) = *shared_ids2.read().unwrap() {
+                state2.receivers.write().remove(receiver_id);
+            }
             res
         });
 
     // Run our stream and our channel forwarding futures until completion:
     from_sender.join(pipe).map(|_| ())
-}
-
-fn handle_receiver_ws(ws: WebSocket, _state: State) -> impl Future<Item = (), Error = ()> {
-
-    let (_tx, messages_from_receiver) = ws.split();
-    // let this_id = state.write().unwrap().add_receiver(tx);
-
-    messages_from_receiver
-        // Each time a message comes in, handle it:
-        .for_each(|_msg| {
-
-            Ok(())
-        })
-        // When the connection is closed, for_each ends
-        // and this will run:
-        .then(move |res| {
-            // state.write().unwrap().remove_receiver(&this_id);
-            res
-        })
-        // Catch and report any errors:
-        .map_err(|e| {
-            eprintln!("Websocket error from receiver: {}", e);
-        })
 }
 
 fn with_serialized_sink<InSink, I, E>(tx: InSink) -> impl Sink<SinkItem = I, SinkError = E>

@@ -18,7 +18,7 @@ pub enum MsgToReceiver {
 #[serde(tag = "type")]
 pub enum MsgFromReceiver {
     /// Expected when first connected. If client already has ID they provide it:
-    Hankshake { sender_id: Id, id: Option<Id> },
+    Handshake { sender_id: Id, id: Option<Id> },
     /// Ask sender to upload a given file to a url defined by stream_id:
     PleaseUpload { file_id: Id, stream_id: Id },
     /// Ask sender to provide the file list for me
@@ -33,9 +33,7 @@ pub enum MsgToSender {
     /// Ask sender to upload a given file to a url defined by stream_id:
     PleaseUpload { file_id: Id, stream_id: Id },
     /// Ask sender to provide the file list for me
-    PleaseFileList,
-    /// Send back error if something went wrong:
-    Error { reason: String }
+    PleaseFileList { receiver_id: Id }
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]

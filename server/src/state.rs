@@ -37,6 +37,13 @@ impl Senders {
     pub fn get(&self, sender_id: Id) -> Option<Sender> {
         self.senders.read().unwrap().get(&sender_id).map(|s| s.clone())
     }
+    pub fn send(&self, sender_id: Id, msg: MsgToSender) -> bool {
+        if let Some(sender) = self.senders.write().unwrap().get(&sender_id) {
+            let _ = sender.tx.unbounded_send(msg);
+            return true;
+        }
+        false
+    }
 }
 
 #[derive(Clone)]
@@ -87,22 +94,18 @@ pub struct ReceiversWriteLock<'a> {
 }
 
 impl <'a> ReceiversWriteLock<'a> {
-    pub fn send_all(&mut self, msg: MsgToReceiver) {
-        for r in self.lock.values_mut() {
-            r.tx.unbounded_send(msg.clone());
-        }
-    }
     pub fn send_one(&mut self, receiver_id: Id, msg: MsgToReceiver) -> bool {
         match self.lock.get_mut(&receiver_id) {
-            Some(r) => { r.tx.unbounded_send(msg); true },
+            Some(r) => { let _ = r.tx.unbounded_send(msg); true },
             None => false
         }
     }
-    pub fn send(&mut self, msg: MsgToReceiver, receiver_id: Option<Id>) {
-        match receiver_id {
-            Some(id) => { self.send_one(id, msg); },
-            None => { self.send_all(msg); }
-        };
+    pub fn send_if(&mut self, msg: MsgToReceiver, mut cond: impl FnMut(&Receiver) -> bool) {
+        for r in self.lock.values_mut() {
+            if cond(r) {
+                let _ = r.tx.unbounded_send(msg.clone());
+            }
+        }
     }
     pub fn remove(&mut self, receiver_id: Id) -> bool {
         self.lock.remove(&receiver_id).map(|_| true).unwrap_or(false)
