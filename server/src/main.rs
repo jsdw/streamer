@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock};
 use derive_more::{FromStr,Display};
 use hyper::Body;
 
-use crate::messages::{MsgToReceiver, MsgFromReceiver, MsgToSender, MsgFromSender};
+use crate::messages::{MsgToReceiver, MsgToSender};
 use crate::id::Id;
 
 #[derive(FromStr)]
@@ -194,25 +194,43 @@ fn handle_sender_ws(ws: WebSocket, state: State) -> impl Future<Item = (), Error
         // Each time a message comes in, handle it:
         .for_each(move |msg| {
 
-            let msg = match msg.to_str().and_then(|s| serde_json::from_str(s).map_err(|_| ())) {
+            let maybe_sender_id = shared_sender_id.read().unwrap().clone();
+
+            println!("From sender {}: {:?}", maybe_sender_id.unwrap_or_else(Id::none), msg);
+
+            let msg_str = msg.to_str().unwrap_or("");
+            let msg = match serde_json::from_str(msg_str) {
                 Ok(s) => s,
-                Err(_) => return Ok(())
+                Err(e) => {
+                    eprintln!("Error decoding message {}: {}", msg_str, e);
+                    return Ok(())
+                }
             };
 
             let send_message = |msg: MsgToReceiver, receiver_id: Option<Id>| {
                 if let Some(receiver_id) = receiver_id {
                     state.receivers.write().send_one(receiver_id, msg);
-                } else if let Some(sender_id) = *shared_sender_id.read().unwrap() {
+                } else if let Some(sender_id) = maybe_sender_id {
                     state.receivers.write().send_if(msg, |r| r.sender_id == sender_id);
                 }
             };
 
-            use self::messages::MsgFromSender::*;
+            use crate::messages::MsgFromSender::*;
             match msg {
                 Handshake { id: maybe_id } => {
-                    let sender_id = state.senders.add(messages_to_sender.clone(), maybe_id);
-                    *shared_sender_id.write().unwrap() = Some(sender_id);
-                    let _ = messages_to_sender.unbounded_send(MsgToSender::HandshakeAck{ id: sender_id });
+                    match maybe_sender_id {
+                        Some(current_id) => {
+                            // If we have done a handshake, don't allow another one and return the same ID.
+                            // there is no reason we should want to re-handshake unless we lose our connection..
+                            let _ = messages_to_sender.unbounded_send(MsgToSender::HandshakeAck{ id: current_id });
+                        },
+                        None => {
+                            let sender_id = state.senders.add(messages_to_sender.clone(), maybe_id);
+                            *shared_sender_id.write().unwrap() = Some(sender_id);
+                            let _ = messages_to_sender.unbounded_send(MsgToSender::HandshakeAck{ id: sender_id });
+                        }
+                    }
+
                 },
                 PleaseUploadAck { stream_id, info } => {
                     if let Some(chan) = state.streams.take_info(stream_id) {
@@ -270,19 +288,37 @@ fn handle_receiver_ws(ws: WebSocket, state: State) -> impl Future<Item = (), Err
             eprintln!("Websocket error from sender: {}", e);
         })
         // Each time a message comes in, handle it:
-        .for_each(move |msg| {
+        .for_each(move |raw_msg| {
 
-            let msg = match msg.to_str().and_then(|s| serde_json::from_str(s).map_err(|_| ())) {
+            let maybe_receiver_id = shared_ids.read().unwrap().clone().map(|(_, r)| r);
+
+            println!("From receiver {}: {:?}", maybe_receiver_id.unwrap_or_else(Id::none), raw_msg);
+
+            let msg_str = raw_msg.to_str().unwrap_or("");
+            let msg = match serde_json::from_str(msg_str) {
                 Ok(s) => s,
-                Err(_) => return Ok(())
+                Err(e) => {
+                    eprintln!("Error decoding message {}: {}", msg_str, e);
+                    return Ok(())
+                }
             };
 
-            use self::messages::MsgFromReceiver::*;
+            use crate::messages::MsgFromReceiver::*;
             match msg {
                 Handshake { sender_id, id: maybe_id } => {
-                    let receiver_id = state.receivers.add(sender_id, messages_to_receiver.clone(), maybe_id);
-                    *shared_ids.write().unwrap() = Some((sender_id, receiver_id));
-                    let _ = messages_to_receiver.unbounded_send(MsgToReceiver::HandshakeAck{ id: receiver_id });
+                    match maybe_receiver_id {
+                        Some(current_receiver_id) => {
+                            // If we have done a handshake, don't allow another one and return the same ID.
+                            // there is no reason we should want to re-handshake unless we lose our connection..
+                            let _ = messages_to_receiver.unbounded_send(MsgToReceiver::HandshakeAck{ id: current_receiver_id });
+                        },
+                        None => {
+                            let receiver_id = state.receivers.add(sender_id, messages_to_receiver.clone(), maybe_id);
+                            *shared_ids.write().unwrap() = Some((sender_id, receiver_id));
+                            let _ = messages_to_receiver.unbounded_send(MsgToReceiver::HandshakeAck{ id: receiver_id });
+                        }
+                    }
+
                 },
                 PleaseUpload { file_id, stream_id } => {
                     if let Some((sender_id, _receiver_id)) = *shared_ids.read().unwrap() {

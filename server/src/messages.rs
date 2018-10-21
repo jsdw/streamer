@@ -1,7 +1,7 @@
 use serde_derive::{Serialize,Deserialize};
 use crate::id::Id;
 
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type")]
 pub enum MsgToReceiver {
     /// Acknowledge a handshake message, giving back the ID:
@@ -14,7 +14,7 @@ pub enum MsgToReceiver {
     FileList { files: Vec<File> },
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type")]
 pub enum MsgFromReceiver {
     /// Expected when first connected. If client already has ID they provide it:
@@ -25,7 +25,7 @@ pub enum MsgFromReceiver {
     PleaseFileList,
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type")]
 pub enum MsgToSender {
     /// Acknowledge a handshake message, giving back the ID:
@@ -36,7 +36,7 @@ pub enum MsgToSender {
     PleaseFileList { receiver_id: Id }
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "type")]
 pub enum MsgFromSender {
     /// Expected when first connected. If client already has ID they provide it:
@@ -51,7 +51,7 @@ pub enum MsgFromSender {
     PleaseUploadAck { stream_id: Id, info: FileInfoForStream }
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct FileInfoForStream {
     /// Name of the file:
     pub name: String,
@@ -59,7 +59,7 @@ pub struct FileInfoForStream {
     pub size: u64
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct File {
     id: String,
     name: String,

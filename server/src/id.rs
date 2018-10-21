@@ -14,13 +14,26 @@ impl IdGen {
     // This doesn't need mut self at the moment, but eventually
     // we'll prob make it more efficient by keeping state:
     pub fn make_id(&mut self) -> Id {
-        Id { val: rand::random() }
+        loop {
+            // don't allow 0 ID: this is seen as empty, or no id.
+            // we only really distinguish so that we can print the
+            // "no id" differently when displaying.
+            let new_id = rand::random();
+            if new_id == [0; 16] { continue };
+            return Id { val: new_id }
+        }
     }
 }
 
-#[derive(Eq,PartialEq,Ord,PartialOrd,Clone,Copy,Hash)]
+#[derive(Debug,Eq,PartialEq,Ord,PartialOrd,Clone,Copy,Hash)]
 pub struct Id {
     val: [u8; 16]
+}
+
+impl Id {
+    pub fn none() -> Id {
+        Id { val: [0; 16] }
+    }
 }
 
 // How to get an Id from a string:
@@ -44,7 +57,11 @@ fn to_str(id: &Id) -> String {
 // Display trait just turns Id into string rep:
 impl fmt::Display for Id {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", to_str(self))
+        if self.val == [0; 16] {
+            write!(f, "<<no_id>>")
+        } else {
+            write!(f, "{}", to_str(self))
+        }
     }
 }
 
