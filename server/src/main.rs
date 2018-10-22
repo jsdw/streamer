@@ -4,6 +4,7 @@ mod client;
 mod id;
 mod state;
 mod messages;
+mod cli;
 
 use serde_derive::{Serialize,Deserialize};
 use futures::{future, Future, Sink, Stream, sync::{oneshot,mpsc}};
@@ -12,6 +13,7 @@ use warp::http::{Response,status::StatusCode};
 use std::sync::{Arc, RwLock};
 use derive_more::{FromStr,Display};
 use hyper::Body;
+use structopt::StructOpt;
 
 use crate::messages::{MsgToReceiver, MsgToSender};
 use crate::id::Id;
@@ -28,6 +30,8 @@ struct StreamId(Id);
 type State = Arc<state::State>;
 
 fn main() {
+
+    let opts = cli::Options::from_args();
 
     // Make some shared state available in every route that needs it:
     let state: State = Arc::new(state::State::new());
@@ -70,9 +74,10 @@ fn main() {
         .and_then(handle_download);
 
     // GET client files
+    let client_files = opts.client_files;
     let other = warp::get2()
         .and(warp::path::tail())
-        .map(client::return_file);
+        .and_then(move |path| client::return_file(&client_files, path));
 
     // put our routes together and serve them:
     let routes = api_sender_ws
@@ -81,9 +86,8 @@ fn main() {
         .or(api_download)
         .or(other);
 
-    println!("Starting server!");
-    warp::serve(routes)
-        .run(([127, 0, 0, 1], 3030));
+    println!("Starting server on {}", opts.address);
+    warp::serve(routes).run(opts.address);
 
 }
 
