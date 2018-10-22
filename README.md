@@ -38,7 +38,7 @@ cargo install --path .
 Running
 -------
 
-The above installs our binary (by default to $HOME/.cargo/bin/file_streamer).
+The above installs our binary (by default to `$HOME/.cargo/bin/file_streamer`).
 
-When ran with `--help` it'll provide any useful commands that you can run.
+When run with `--help` it'll list any arguments you can provide.
 
