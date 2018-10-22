@@ -5,7 +5,7 @@ use tokio::fs::File;
 use futures::future;
 use futures::future::Future;
 
-static CLIENT_DIR: Dir = include_dir!("../client");
+static CLIENT_DIR: Dir = include_dir!("../client/dist");
 
 /// Takes the tail of a path and returns a file from our compiled-in
 /// content with the correct mime-type and such, or a 404 if not found.

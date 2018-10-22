@@ -1,0 +1,36 @@
+{
+  "name": "file_streamer",
+  "version": "1.0.0",
+  "description": "A simple file sharing utility",
+  "main": "index.js",
+  "scripts": {
+    "watch": "parcel watch src/index.html",
+    "start": "parcel serve src/index.html",
+    "build": "parcel build src/index.html"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jsdw/streamer.git"
+  },
+  "author": "James Wilson",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/jsdw/streamer/issues"
+  },
+  "homepage": "https://github.com/jsdw/streamer#readme",
+  "engines": {
+    "node": ">= 10.8.0",
+    "npm": ">= 6.2.0"
+  },
+  "dependencies": {
+    "react": "^16.4.2",
+    "react-dom": "^16.4.2"
+  },
+  "devDependencies": {
+    "@types/react": "^16.4.9",
+    "@types/react-dom": "^16.0.7",
+    "node-sass": "^4.9.4",
+    "parcel-bundler": "^1.10.3",
+    "typescript": "^3.1.3"
+  }
+}
