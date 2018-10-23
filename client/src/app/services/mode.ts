@@ -30,3 +30,5 @@ export enum Mode {
 }
 
 export const MODE = getModeDetails();
+export const isSender = MODE.mode === Mode.Sender;
+export const isReceiver = MODE.mode === Mode.Receiver;
