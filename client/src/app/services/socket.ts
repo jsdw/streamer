@@ -1,5 +1,6 @@
 import * as Mode from "./mode";
 import { Channel } from "./channel";
+import { string } from "prop-types";
 
 if(!document.location) {
     throw Error("document.location is null");
@@ -12,7 +13,7 @@ function MakeWebSocket(): WebSocket {
     return new WebSocket(`${BASE_URL}/api/${type}/ws`);
 }
 
-export function Socket<Msg>() {
+export function Socket<From, To>() {
 
     let ws = open();
     let hasClosed = false;
@@ -23,6 +24,7 @@ export function Socket<Msg>() {
     const onclose = Channel<null>();
     const onopen = Channel<null>();
     const onerror = Channel<any>();
+    const onmessage = Channel<To>();
 
     function open(): WebSocket {
         ws = MakeWebSocket();
@@ -38,6 +40,10 @@ export function Socket<Msg>() {
         ws.onerror = (e) => {
             onerror.emit(e);
         }
+        ws.onmessage = (e) => {
+            const msg: To = JSON.parse(e.data);
+            onmessage.emit(msg);
+        }
         return ws;
     }
 
@@ -50,13 +56,15 @@ export function Socket<Msg>() {
 
     return {
         /** try to send a message through the socket (will fail if it's not open) */
-        send: (msg: Msg) => ws.send(JSON.stringify(msg)),
+        send: (msg: From) => ws.send(JSON.stringify(msg)),
         /** notify when the socket becomes ready to send messages */
         onopen: onopen.onemit,
         /** notify when an error happens on the socket */
         onerror: onerror.onemit,
         /** notify when the socket is closed (it will auto re-open eventually when possible) */
         onclose: onclose.onemit,
+        /** receive incoming messages */
+        onmessage: onmessage.onemit,
         /** the current status of the socket. Should equal one of the constants below */
         status: () => ws.readyState as Status,
     }

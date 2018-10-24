@@ -29,6 +29,7 @@ export enum Mode {
     Receiver
 }
 
-export const MODE = getModeDetails();
-export const isSender = MODE.mode === Mode.Sender;
-export const isReceiver = MODE.mode === Mode.Receiver;
+export const details = getModeDetails();
+export const mode = details.mode;
+export const isSender = details.mode === Mode.Sender;
+export const isReceiver = details.mode === Mode.Receiver;
