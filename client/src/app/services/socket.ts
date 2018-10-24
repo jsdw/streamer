@@ -1,6 +1,5 @@
 import * as Mode from "./mode";
-import { Channel } from "./channel";
-import { string } from "prop-types";
+import { MakeChannel } from "./channel";
 
 if(!document.location) {
     throw Error("document.location is null");
@@ -13,7 +12,7 @@ function MakeWebSocket(): WebSocket {
     return new WebSocket(`${BASE_URL}/api/${type}/ws`);
 }
 
-export function Socket<From, To>() {
+export function MakeSocket<From, To>() {
 
     let ws = open();
     let hasClosed = false;
@@ -21,10 +20,10 @@ export function Socket<From, To>() {
     const maxRetryTime = 10000;
     let retryTime = minRetryTime;
 
-    const onclose = Channel<null>();
-    const onopen = Channel<null>();
-    const onerror = Channel<any>();
-    const onmessage = Channel<To>();
+    const onclose = MakeChannel<null>();
+    const onopen = MakeChannel<null>();
+    const onerror = MakeChannel<any>();
+    const onmessage = MakeChannel<To>();
 
     function open(): WebSocket {
         ws = MakeWebSocket();
@@ -70,6 +69,11 @@ export function Socket<From, To>() {
     }
 
 }
+
+// A bit of hackery to return a generic type describing what we
+// get back from the above:
+class _s_<From,To> { sock = MakeSocket<From,To>(); }
+export type Socket<From,To> = _s_<From,To>['sock'];
 
 export enum Status {
     CONNECTING = WebSocket.CONNECTING,

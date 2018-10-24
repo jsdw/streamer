@@ -1,4 +1,4 @@
-export function Channel<T>() {
+export function MakeChannel<T>() {
 
     let listeners: ((msg: T) => void)[] = [];
 

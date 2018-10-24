@@ -1,6 +1,5 @@
-import { Socket } from "./socket";
-import { mode, Mode } from  "./mode";
-import { any } from "prop-types";
+import { MakeSocket, Socket } from "./socket";
+import { Mode } from  "./mode";
 
 type Id = string;
 
@@ -38,26 +37,16 @@ type File = {
     size: number
 };
 
-// This is a hack to be able to talk about specific types of
-// socket without having to expose the type of Socket from its
-// package. These functions arent used anywhere, just the types
-// we infer from them:
-const anySocket = () => Socket<any,any>();
-type SocketAny = ReturnType<typeof anySocket>;
-const recvSocket = () => Socket<MsgToReceiver,MsgFromReceiver>();
-type SocketRecv = ReturnType<typeof recvSocket>;
-const sendSocket = () => Socket<MsgToSender,MsgFromSender>();
-type SocketSend = ReturnType<typeof sendSocket>;
-
 // Get a socket or use the cached one:
-let socket: SocketAny|null = null;
-function getSocket(): SocketAny {
-    return socket || (socket = Socket());
+let socket: Socket<any,any>|null = null;
+function getSocket(): Socket<any,any> {
+    return socket || (socket = MakeSocket());
 }
 
 // Type the socket based on the mode we provide to get hold of it:
-export function Api(mode: Mode.Receiver): SocketRecv;
-export function Api(mode: Mode.Sender): SocketSend;
-export function Api(_: Mode): SocketAny {
+// need to type guard on mode to use the correct API, or specify mode by hand.
+export function Api(mode: Mode.Receiver): Socket<MsgFromReceiver,MsgToReceiver>;
+export function Api(mode: Mode.Sender): Socket<MsgFromSender,MsgToSender>;
+export function Api(_: Mode): Socket<any,any> {
     return getSocket();
 }

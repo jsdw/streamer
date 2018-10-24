@@ -11,6 +11,8 @@
         "lib": ["es5", "es6", "dom"],
         "noUnusedLocals": true,
         "noUnusedParameters": true,
-        "removeComments": true
+        "noImplicitAny": true,
+        "noEmitOnError": true,
+        "removeComments": true,
     }
 }
